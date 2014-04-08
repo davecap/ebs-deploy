@@ -1,4 +1,4 @@
-from boto.exception import S3ResponseError
+from boto.exception import S3ResponseError, BotoServerError
 from boto.s3.connection import S3Connection
 from boto.beanstalk import connect_to_region
 from boto.s3.key import Key
@@ -403,7 +403,7 @@ class EbsHelper(object):
         environment_names = environment_names[:]
 
         # print some stuff
-        s = "Waiting for environemnt(s) "+(", ".join(environment_names))+" to"
+        s = "Waiting for environment(s) "+(", ".join(environment_names))+" to"
         if health is not None:
             s = s +" have health "+health
         else:
@@ -414,25 +414,40 @@ class EbsHelper(object):
             s = s + " and have status "+status
         out(s)
 
+        retries = 0
         started = time()
+
         while True:
             # bail if they're all good
             if len(environment_names)==0:
                 break
 
-            # wait
-            sleep(5)
+            # exponential backoff
+            sleep(2**retries)
 
             ## get the env
-            environments = self.ebs.describe_environments(
-                application_name=self.app_name, environment_names=environment_names, include_deleted=include_deleted)
+            try:
+                environments = self.ebs.describe_environments(
+                    application_name=self.app_name,
+                    environment_names=environment_names,
+                    include_deleted=include_deleted)
+            except BotoServerError as e:
+                if e.error_code == 'Throttling':
+                    out('Rate-limit exceeded, throttling the request rate...')
+                    retries += 1
+                    continue
+                else:
+                    raise
+            else:
+                # reset if no exception
+                retries = 0
+
             environments = environments['DescribeEnvironmentsResponse']['DescribeEnvironmentsResult']['Environments']
             if len(environments)<=0:
                 raise Exception("Couldn't find any environments")
 
             # loop through and wait
             for env in environments[:]:
-                heathy = env['Health'] == health
                 env_name = env['EnvironmentName']
 
                 # the message
